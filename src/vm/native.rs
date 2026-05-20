@@ -4,6 +4,19 @@ use super::{Vm, Object};
 
 pub type NativeMethod = fn(&mut Vm, &[u32]) -> DexResult<Option<u32>>;
 
+/// Register built-in native method implementations used by the VM.
+///
+/// Returns a HashMap that maps Java native method descriptors (for example
+/// `"Ljava/io/PrintStream;->println(I)V"`) to Rust `NativeMethod` function pointers
+/// implementing those natives.
+///
+/// # Examples
+///
+/// ```
+/// let natives = get_native_methods();
+/// assert!(natives.contains_key("Ljava/lang/Object;-><init>()V"));
+/// assert!(natives.contains_key("Ljava/io/PrintStream;->println(Ljava/lang/String;)V"));
+/// ```
 pub fn get_native_methods() -> HashMap<String, NativeMethod> {
     let mut m: HashMap<String, NativeMethod> = HashMap::new();
     

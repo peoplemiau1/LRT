@@ -31,6 +31,17 @@ struct ChunkHeader {
     size: u32,
 }
 
+/// Parses a binary manifest-like buffer into a tree of `AxmlElement` and returns its root element.
+///
+/// Decodes string pool, resource map, start/end element chunks and builds an element tree. Returns an error if parsing fails or no root element is found.
+///
+/// # Examples
+///
+/// ```
+/// # use crate::{parse_manifest};
+/// let data: &[u8] = &[];
+/// assert!(parse_manifest(data).is_err());
+/// ```
 pub fn parse_manifest(data: &[u8]) -> AxmlResult<AxmlElement> {
     let mut offset = 0;
     let _header: ChunkHeader = data.pread_with(offset, LE)?;

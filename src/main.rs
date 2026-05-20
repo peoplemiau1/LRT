@@ -8,6 +8,44 @@ use linux_android_runtime::resources::parse_resources;
 use scroll::{Pread, LE};
 
 
+/// Finds the Android main activity type descriptor from an AXML element tree.
+///
+/// Searches recursively for an `<activity>` element that contains an `<intent-filter>` with
+/// an `<action>` whose `android:name` equals `"android.intent.action.MAIN"`. When found,
+/// returns the activity class name normalized to a DEX-style type descriptor:
+/// - If the attribute value starts with `.`, the leading `.` is removed.
+/// - If the value does not start with `L`, `.` are replaced with `/`, the result is prefixed with `L` and suffixed with `;`.
+///
+/// # Returns
+///
+/// `Some(String)` containing the normalized DEX type descriptor of the main activity when found, `None` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// // Construct a minimal element representing:
+/// // <activity android:name="com.example.Main">
+/// //   <intent-filter>
+/// //     <action android:name="android.intent.action.MAIN"/>
+/// //   </intent-filter>
+/// // </activity>
+/// let element = AxmlElement {
+///     name: "activity".into(),
+///     attributes: vec![AxmlAttribute { name: "name".into(), id: 0, value: "com.example.Main".into() }],
+///     children: vec![AxmlElement {
+///         name: "intent-filter".into(),
+///         attributes: vec![],
+///         children: vec![AxmlElement {
+///             name: "action".into(),
+///             attributes: vec![AxmlAttribute { name: "name".into(), id: 0, value: "android.intent.action.MAIN".into() }],
+///             children: vec![],
+///         }],
+///     }],
+/// };
+///
+/// let found = find_main_activity(&element);
+/// assert_eq!(found, Some("Lcom/example/Main;".to_string()));
+/// ```
 fn find_main_activity(element: &AxmlElement) -> Option<String> {
     if element.name == "activity" {
         let mut is_main = false;
@@ -56,6 +94,23 @@ fn print_element(element: &AxmlElement, depth: usize) {
     }
 }
 
+/// Program entry point that loads a DEX or APK, prepares a VM (including secondary DEX and resources),
+/// and locates and executes a specified class method (defaulting to the app's main activity and `onCreate`).
+///
+/// This function:
+/// - Accepts a path to a `.dex` or `.apk` file as the first CLI argument.
+/// - Optionally accepts a DEX type descriptor class name and a method name as second and third arguments.
+/// - When given an APK, extracts `classes.dex`, any subsequent `classesN.dex` files, `resources.arsc`, and `AndroidManifest.xml`.
+/// - Constructs a VM, registers extra DEX files and optional `android.dex` classpath, locates the target method by walking superclasses,
+///   builds mock arguments for reference/array parameters, and invokes the method.
+/// - Prints available methods when the target method is not found.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Run the program against an APK, specifying a class and method:
+/// // linux-android-runtime path/to/app.apk "Lcom/example/tinyart/MainActivity;" "onCreate"
+/// ```
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
