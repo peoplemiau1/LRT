@@ -4,6 +4,7 @@ use scroll::{Pread, LE};
 
 pub fn execute_instruction(
     vm: &mut Vm,
+    dex_idx: usize,
     opcode: u8,
     insn: u16,
     pc: &mut usize,
@@ -92,12 +93,13 @@ pub fn execute_instruction(
         0x1a | 0x1b => { 
             let a = (insn as usize >> 8) & 0xFF; *pc += 1;
             let idx = if opcode == 0x1a { code.insns[*pc] as u32 } else { let l = code.insns[*pc] as u32; *pc += 1; let h = code.insns[*pc] as u32; (h << 16) | l };
-            let s = vm.dex.get_string(idx)?; let obj = vm.alloc(Object::String(s)); registers[a] = obj; *pc += 1;
+            let s = vm.get_dex(dex_idx).get_string(idx)?; let obj = vm.alloc(Object::String(s)); registers[a] = obj; *pc += 1;
         }
         0x1c => { 
             let a = (insn as usize >> 8) & 0xFF; *pc += 1; 
-            let _type_idx = code.insns[*pc] as u32;
-            let obj = vm.alloc(Object::Instance { class_idx: 0xFFFFFFFE, fields: std::collections::HashMap::new() });
+            let type_idx = code.insns[*pc] as u32;
+            let type_name = vm.get_dex(dex_idx).get_type(type_idx)?;
+            let obj = vm.alloc(Object::Instance { class_desc: format!("Ljava/lang/Class;<{}>", type_name), fields: std::collections::HashMap::new() });
             registers[a] = obj; *pc += 1; 
         }
         0x1d => { let a = (insn as usize >> 8) & 0xFF; vm.monitor_enter(registers[a]); *pc += 1; }
@@ -105,25 +107,24 @@ pub fn execute_instruction(
         0x1f => { 
             let a = (insn as usize >> 8) & 0xF; let b = (insn as usize >> 12) & 0xF; *pc += 1; let type_idx = code.insns[*pc] as u32;
             let obj_id = registers[b];
-            let mut class_idx = 0;
+            let mut class_name: Option<String> = None;
             let mut is_special = false;
             {
                 let s = vm.state.lock().unwrap();
                 if let Some(obj) = s.heap.get(obj_id as usize) {
                     match obj {
-                        Object::Instance { class_idx: ci, .. } => { class_idx = *ci; }
-                        Object::String(_) => { is_special = vm.dex.get_type(type_idx).unwrap_or_default() == "Ljava/lang/String;"; }
-                        Object::Array { .. } => { is_special = vm.dex.get_type(type_idx).unwrap_or_default().starts_with('['); }
+                        Object::Instance { class_desc, .. } => { class_name = Some(class_desc.clone()); }
+                        Object::String(_) => { is_special = vm.get_dex(dex_idx).get_type(type_idx).unwrap_or_default() == "Ljava/lang/String;"; }
+                        Object::Array { .. } => { is_special = vm.get_dex(dex_idx).get_type(type_idx).unwrap_or_default().starts_with('['); }
                         _ => {}
                     }
                 }
             }
             let matches = if is_special {
                 true
-            } else if class_idx != 0 {
-                let class_name = vm.dex.get_type(class_idx)?;
-                let target_name = vm.dex.get_type(type_idx)?;
-                vm.is_instance_of(&class_name, &target_name)?
+            } else if let Some(ref c_name) = class_name {
+                let target_name = vm.get_dex(dex_idx).get_type(type_idx)?;
+                vm.is_instance_of(c_name, &target_name)?
             } else {
                 false
             };
@@ -133,23 +134,22 @@ pub fn execute_instruction(
         0x20 => { 
             let a_reg = (insn as usize >> 8) & 0xFF;
             *pc += 1; let type_idx = code.insns[*pc] as u32;
-            let mut class_idx = 0;
+            let mut class_name: Option<String> = None;
             if a_reg < registers.len() {
                 let obj_id = registers[a_reg];
                 {
                     let s = vm.state.lock().unwrap();
                     if let Some(obj) = s.heap.get(obj_id as usize) {
                         match obj {
-                            Object::Instance { class_idx: ci, .. } => { class_idx = *ci; }
-                            Object::String(_) => { if vm.dex.get_type(type_idx).unwrap_or_default() != "Ljava/lang/String;" { return Err(DexError::Exception(0)); } }
+                            Object::Instance { class_desc, .. } => { class_name = Some(class_desc.clone()); }
+                            Object::String(_) => { if vm.get_dex(dex_idx).get_type(type_idx).unwrap_or_default() != "Ljava/lang/String;" { return Err(DexError::Exception(0)); } }
                             _ => {}
                         }
                     }
                 }
-                if class_idx != 0 {
-                    let class_name = vm.dex.get_type(class_idx)?;
-                    let target_name = vm.dex.get_type(type_idx)?;
-                    if !vm.is_instance_of(&class_name, &target_name)? { return Err(DexError::Exception(0)); }
+                if let Some(ref c_name) = class_name {
+                    let target_name = vm.get_dex(dex_idx).get_type(type_idx)?;
+                    if !vm.is_instance_of(c_name, &target_name)? { return Err(DexError::Exception(0)); }
                 }
             }
             *pc += 1;
@@ -159,10 +159,16 @@ pub fn execute_instruction(
             registers[a] = vm.get_array_length(registers[b])? as u32;
             *pc += 1;
         }
-        0x22 => { let a = (insn as usize >> 8) & 0xFF; *pc += 1; let idx = code.insns[*pc] as u32; let obj = vm.alloc(Object::Instance { class_idx: idx, fields: std::collections::HashMap::new() }); registers[a] = obj; *pc += 1; }
+        0x22 => { 
+            let a = (insn as usize >> 8) & 0xFF; *pc += 1; 
+            let idx = code.insns[*pc] as u32; 
+            let type_name = vm.get_dex(dex_idx).get_type(idx)?;
+            let obj = vm.alloc(Object::Instance { class_desc: type_name, fields: std::collections::HashMap::new() }); 
+            registers[a] = obj; *pc += 1; 
+        }
         0x23 => { 
             let a = (insn as usize >> 8) & 0xF; let b = (insn as usize >> 12) & 0xF; *pc += 1; let size = registers[b] as usize; let type_idx = code.insns[*pc] as u32;
-            let type_name = vm.dex.get_type(type_idx)?;
+            let type_name = vm.get_dex(dex_idx).get_type(type_idx)?;
             let obj = vm.alloc(Object::Array { element_type: type_name, data: vec![0; size] });
             registers[a] = obj; *pc += 1;
         }
@@ -175,7 +181,7 @@ pub fn execute_instruction(
                 let c = (insn as usize >> 8) & 0xFF; *pc += 1; let ti = code.insns[*pc] as u32; *pc += 1; let sr = code.insns[*pc] as usize;
                 let mut a = Vec::new(); for i in 0..c { a.push(registers[sr + i]); } (c, ti, a)
             };
-            let type_name = vm.dex.get_type(type_idx)?;
+            let type_name = vm.get_dex(dex_idx).get_type(type_idx)?;
             let obj = vm.alloc(Object::Array { element_type: type_name, data: args });
             vm.last_result = Some(obj);
             *pc += 1;
@@ -254,7 +260,33 @@ pub fn execute_instruction(
         0x52..=0x5f => { 
             let a = (insn as usize >> 8) & 0xF; let b = (insn as usize >> 12) & 0xF; *pc += 1; let f_idx = code.insns[*pc] as u32; let obj = registers[b];
             if opcode <= 0x58 { 
-                registers[a] = vm.get_field(obj, f_idx)?;
+                let mut val = vm.get_field(obj, f_idx)?;
+                if opcode == 0x54 && val == 0 {
+                    let active_dex = vm.get_dex(dex_idx);
+                    let off = active_dex.header.field_ids_off as usize + (f_idx as usize * 8);
+                    if let Ok(f_id) = active_dex.data.pread_with::<crate::dex::FieldId>(off, LE) {
+                        if let Ok(type_name) = active_dex.get_type(f_id.type_idx as u32) {
+                            if type_name.starts_with('L') {
+                                if type_name == "Ljava/lang/String;" {
+                                    val = vm.alloc(Object::String("".into()));
+                                } else {
+                                    val = vm.alloc(Object::Instance {
+                                        class_desc: type_name,
+                                        fields: std::collections::HashMap::new(),
+                                    });
+                                }
+                                vm.set_field(obj, f_idx, val)?;
+                            } else if type_name.starts_with('[') {
+                                val = vm.alloc(Object::Array {
+                                    element_type: type_name,
+                                    data: Vec::new(),
+                                });
+                                vm.set_field(obj, f_idx, val)?;
+                            }
+                        }
+                    }
+                }
+                registers[a] = val;
                 if opcode == 0x53 { registers[a+1] = vm.get_field(obj, f_idx+1)?; }
             } else { 
                 vm.set_field(obj, f_idx, registers[a])?;
@@ -264,15 +296,42 @@ pub fn execute_instruction(
         }
         0x60..=0x6d => { 
             let a = (insn as usize >> 8) & 0xFF; *pc += 1; let f_idx = code.insns[*pc] as u32;
-            let off = vm.dex.header.field_ids_off as usize + (f_idx as usize * 8);
-            let f_id: crate::dex::FieldId = vm.dex.data.pread_with(off, LE)?;
-            vm.initialize_class(f_id.class_idx as u32)?;
+            let (f_class_idx, f_name_idx, f_type_idx) = {
+                let active_dex = vm.get_dex(dex_idx);
+                let off = active_dex.header.field_ids_off as usize + (f_idx as usize * 8);
+                let f_id: crate::dex::FieldId = active_dex.data.pread_with(off, LE)?;
+                (f_id.class_idx as u32, f_id.name_idx, f_id.type_idx)
+            };
+            
+            vm.initialize_class(dex_idx, f_class_idx)?;
             
             if opcode <= 0x66 { 
-                let f_name = vm.dex.get_string(f_id.name_idx).unwrap_or("".into());
-                if f_name == "out" { registers[a] = vm.alloc(Object::Instance { class_idx: 0xFFFFFFFE, fields: std::collections::HashMap::new() }); }
+                let f_name = vm.get_dex(dex_idx).get_string(f_name_idx).unwrap_or("".into());
+                if f_name == "out" { registers[a] = vm.alloc(Object::Instance { class_desc: "Ljava/io/PrintStream;".into(), fields: std::collections::HashMap::new() }); }
                 else { 
-                    let val = vm.get_static_field(f_id.class_idx as u32, f_idx)?;
+                    let mut val = vm.get_static_field(dex_idx, f_class_idx, f_idx)?;
+                    if opcode == 0x62 && val == 0 {
+                        let active_dex = vm.get_dex(dex_idx);
+                        if let Ok(type_name) = active_dex.get_type(f_type_idx as u32) {
+                            if type_name.starts_with('L') {
+                                if type_name == "Ljava/lang/String;" {
+                                    val = vm.alloc(Object::String("".into())) as u64;
+                                } else {
+                                    val = vm.alloc(Object::Instance {
+                                        class_desc: type_name,
+                                        fields: std::collections::HashMap::new(),
+                                    }) as u64;
+                                }
+                                vm.set_static_field(dex_idx, f_class_idx, f_idx, val)?;
+                            } else if type_name.starts_with('[') {
+                                val = vm.alloc(Object::Array {
+                                    element_type: type_name,
+                                    data: Vec::new(),
+                                }) as u64;
+                                vm.set_static_field(dex_idx, f_class_idx, f_idx, val)?;
+                            }
+                        }
+                    }
                     if opcode == 0x61 { 
                         registers[a] = (val & 0xFFFFFFFF) as u32;
                         registers[a+1] = (val >> 32) as u32;
@@ -286,7 +345,7 @@ pub fn execute_instruction(
                 } else {
                     registers[a] as u64
                 };
-                vm.set_static_field(f_id.class_idx as u32, f_idx, val)?;
+                vm.set_static_field(dex_idx, f_class_idx, f_idx, val)?;
             }
             *pc += 1;
         }
@@ -300,23 +359,35 @@ pub fn execute_instruction(
                 let mut a = Vec::new(); for i in 0..c { a.push(registers[sr + i]); } (c, mi, a)
             };
 
-            let full_sig = vm.dex.get_method_full_signature(m_idx)?;
+            let is_static = opcode == 0x71 || opcode == 0x77;
+            if !is_static {
+                if let Some(&oid) = args.first() {
+                    if oid == 0 {
+                        return Err(DexError::Exception(0));
+                    }
+                } else {
+                    return Err(DexError::Parse("Instance invoke without this argument".into()));
+                }
+            }
+
+            let active_dex = vm.get_dex(dex_idx);
+            let full_sig = active_dex.get_method_full_signature(m_idx)?;
             let res = if let Some(n) = vm.native_methods.get(&full_sig) {
                 n(vm, &args)?
             } else {
-                let (c_def_idx, m_to_call) = if opcode == 0x6e || opcode == 0x72 || opcode == 0x74 || opcode == 0x78 {
+                let (resolved_dex_idx, resolved_class_def_idx, m_to_call) = if opcode == 0x6e || opcode == 0x72 || opcode == 0x74 || opcode == 0x78 {
                     if let Some(&oid) = args.first() {
-                        vm.resolve_method(oid, m_idx)?
+                        vm.resolve_method(dex_idx, oid, m_idx)?
                     } else {
                         return Err(DexError::Parse("Invoke virtual/interface without this".into()));
                     }
                 } else {
-                    let off = vm.dex.header.method_ids_off as usize + (m_idx as usize * 8);
-                    let m_id: crate::dex::MethodId = vm.dex.data.pread_with(off, LE)?;
-                    if let Some(def_idx) = vm.dex.find_class_def(m_id.class_idx as u32)? {
-                        (def_idx, m_idx)
+                    let off = active_dex.header.method_ids_off as usize + (m_idx as usize * 8);
+                    let m_id: crate::dex::MethodId = active_dex.data.pread_with(off, LE)?;
+                    if let Some(def_idx) = active_dex.find_class_def(m_id.class_idx as u32)? {
+                        (dex_idx, def_idx, m_idx)
                     } else {
-                        let class_name = vm.dex.get_type(m_id.class_idx as u32)?;
+                        let class_name = active_dex.get_type(m_id.class_idx as u32)?;
                         let mut has_in_android = false;
                         if let Some(ref ad) = vm.android_dex {
                             if ad.find_class(&class_name)?.is_some() {
@@ -324,15 +395,15 @@ pub fn execute_instruction(
                             }
                         }
                         if has_in_android {
-                            (0xFFFFFFFE, m_idx)
+                            (0xFFFFFFFE, 0xFFFFFFFF, m_idx)
                         } else {
-                            (0xFFFFFFFF, m_idx)
+                            (0xFFFFFFFF, 0xFFFFFFFF, m_idx)
                         }
                     }
                 };
 
-                if c_def_idx != 0xFFFFFFFF {
-                    vm.execute_method(c_def_idx, m_to_call, &args)?
+                if resolved_dex_idx != 0xFFFFFFFF {
+                    vm.execute_method(resolved_dex_idx, resolved_class_def_idx, m_to_call, &args)?
                 } else {
                     None
                 }

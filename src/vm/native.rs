@@ -32,6 +32,62 @@ pub fn get_native_methods() -> HashMap<String, NativeMethod> {
         Ok(None)
     });
 
+    m.insert("Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V".into(), |vm, args| {
+        let obj_id = args[0];
+        let val_id = args[1];
+        if let Some(Object::Instance { fields, .. }) = vm.state.lock().unwrap().heap.get_mut(obj_id as usize) {
+            fields.insert(0, val_id);
+        }
+        Ok(None)
+    });
+
+    m.insert("Ljava/lang/StringBuilder;->append(Ljava/lang/Object;)Ljava/lang/StringBuilder;".into(), |vm, args| {
+        let sb_id = args[0];
+        let obj_id = args[1];
+        let to_add = if obj_id == 0 {
+            "null".to_string()
+        } else {
+            let s = vm.state.lock().unwrap();
+            match s.heap.get(obj_id as usize) {
+                Some(Object::String(s)) => s.clone(),
+                Some(Object::Instance { class_desc, .. }) => format!("Instance of {}", class_desc),
+                Some(Object::Array { element_type, .. }) => format!("Array of {}", element_type),
+                _ => format!("Object@{}", obj_id),
+            }
+        };
+
+        let val_id = if let Some(Object::Instance { fields, .. }) = vm.state.lock().unwrap().heap.get(sb_id as usize) {
+            *fields.get(&0).unwrap_or(&0)
+        } else { 0 };
+
+        let mut current_str = vm.get_string_val(val_id).unwrap_or_default();
+        current_str.push_str(&to_add);
+        let new_id = vm.alloc(Object::String(current_str));
+
+        if let Some(Object::Instance { fields, .. }) = vm.state.lock().unwrap().heap.get_mut(sb_id as usize) {
+            fields.insert(0, new_id);
+        }
+        Ok(Some(sb_id))
+    });
+
+    m.insert("Ljava/lang/StringBuilder;->append(C)Ljava/lang/Appendable;".into(), |vm, args| {
+        let sb_id = args[0];
+        let to_add = if let Some(c) = std::char::from_u32(args[1]) { c.to_string() } else { "".to_string() };
+        
+        let val_id = if let Some(Object::Instance { fields, .. }) = vm.state.lock().unwrap().heap.get(sb_id as usize) {
+            *fields.get(&0).unwrap_or(&0)
+        } else { 0 };
+
+        let mut current_str = vm.get_string_val(val_id).unwrap_or_default();
+        current_str.push_str(&to_add);
+        let new_id = vm.alloc(Object::String(current_str));
+
+        if let Some(Object::Instance { fields, .. }) = vm.state.lock().unwrap().heap.get_mut(sb_id as usize) {
+            fields.insert(0, new_id);
+        }
+        Ok(Some(sb_id))
+    });
+
     m.insert("Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;".into(), |vm, args| {
         let sb_id = args[0];
         let str_id = args[1];

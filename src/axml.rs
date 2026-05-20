@@ -66,41 +66,37 @@ pub fn parse_manifest(data: &[u8]) -> AxmlResult<AxmlElement> {
                 let name = string_pool.get(name_idx as usize).cloned().unwrap_or_default();
                 let mut attributes = Vec::new();
 
-                off = offset + 8 + 20; 
+                let mut off = offset + 16 + _attr_start as usize;
                 for _ in 0..attr_count {
+                    let attr_entry_start = off;
                     let _attr_ns_idx: u32 = data.pread_with(off, LE)?; off += 4;
                     let attr_name_idx: u32 = data.pread_with(off, LE)?; off += 4;
                     let _attr_raw_val_idx: u32 = data.pread_with(off, LE)?; off += 4;
-                    let _attr_type: u16 = data.pread_with(off, LE)?; off += 2;
-                    let _attr_data: u32 = data.pread_with(off + 2, LE)?; off += 8;
+                    let _size: u16 = data.pread_with(off, LE)?; off += 2;
+                    let _res: u8 = data.pread(off)?; off += 1;
+                    let attr_type: u8 = data.pread(off)?; off += 1;
+                    let attr_data: u32 = data.pread_with(off, LE)?;
 
                     let attr_name = string_pool.get(attr_name_idx as usize).cloned().unwrap_or_default();
                     let attr_id = resource_map.get(attr_name_idx as usize).cloned().unwrap_or(0);
                     
-                    let attr_raw_val = string_pool.get(_attr_raw_val_idx as i32 as usize).cloned().unwrap_or_default();
-                    let mut attr_value = if _attr_raw_val_idx != 0xFFFFFFFF {
-                        attr_raw_val
+                    let attr_value = if _attr_raw_val_idx != 0xFFFFFFFF {
+                        string_pool.get(_attr_raw_val_idx as usize).cloned().unwrap_or_default()
+                    } else if attr_type == 0x03 {
+                        string_pool.get(attr_data as usize).cloned().unwrap_or_default()
+                    } else if attr_type == 0x12 {
+                        if attr_data != 0 { "true".to_string() } else { "false".to_string() }
                     } else {
-                        
-                        match _attr_type >> 8 { 
-                             0x03 => string_pool.get(_attr_data as usize).cloned().unwrap_or_default(),
-                             _ => format!("{}", _attr_data)
-                        }
+                        format!("{}", attr_data)
                     };
-
-                    
-                    
-                    if _attr_type == 0x0308 || (_attr_type >> 8 == 0x03) {
-                         if let Some(s) = string_pool.get(_attr_data as usize) {
-                             attr_value = s.clone();
-                         }
-                    }
 
                     attributes.push(AxmlAttribute {
                         name: attr_name,
                         id: attr_id,
                         value: attr_value,
                     });
+
+                    off = attr_entry_start + _attr_size as usize;
                 }
 
                 stack.push(AxmlElement {

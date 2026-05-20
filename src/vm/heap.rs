@@ -4,7 +4,7 @@ use std::collections::HashMap;
 pub enum Object {
     Null,
     Instance {
-        class_idx: u32,
+        class_desc: String,
         fields: HashMap<u32, u32>,
     },
     Array {
