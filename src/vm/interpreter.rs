@@ -67,12 +67,26 @@ pub fn execute_instruction(
             let h = code.insns[*pc] as u32;
             registers[a] = (h << 16) | l; *pc += 1;
         }
-        0x16..=0x18 => { 
+        0x16..=0x19 => {
             let a = (insn as usize >> 8) & 0xFF; *pc += 1;
             let val;
-            if opcode == 0x16 { val = code.insns[*pc] as i16 as i64 as u64; *pc += 1; }
-            else if opcode == 0x17 { val = (code.insns[*pc] as u32 | ((code.insns[*pc+1] as u32) << 16)) as i64 as u64; *pc += 2; }
-            else { val = (code.insns[*pc] as u64) << 48; *pc += 1; }
+            if opcode == 0x16 {
+                val = code.insns[*pc] as i16 as i64 as u64;
+                *pc += 1;
+            } else if opcode == 0x17 {
+                val = (code.insns[*pc] as u32 | ((code.insns[*pc+1] as u32) << 16)) as i64 as u64;
+                *pc += 2;
+            } else if opcode == 0x18 {
+                let l1 = code.insns[*pc] as u64;
+                let l2 = code.insns[*pc+1] as u64;
+                let l3 = code.insns[*pc+2] as u64;
+                let l4 = code.insns[*pc+3] as u64;
+                val = l1 | (l2 << 16) | (l3 << 32) | (l4 << 48);
+                *pc += 4;
+            } else {
+                val = (code.insns[*pc] as u64) << 48;
+                *pc += 1;
+            }
             registers[a] = (val & 0xFFFFFFFF) as u32; registers[a+1] = (val >> 32) as u32;
         }
         0x1a | 0x1b => { 
@@ -518,8 +532,16 @@ pub fn execute_instruction(
             } as u32;
             *pc += 1;
         }
+        0xfc | 0xfd => {
+            *pc += 4;
+            return Err(DexError::Parse(format!("Unsupported API 26+ polymorphic invoke: 0x{:02x}", opcode)));
+        }
+        0xfe | 0xff => {
+            *pc += 3;
+            return Err(DexError::Parse(format!("Unsupported API 26+ custom callsite invoke: 0x{:02x}", opcode)));
+        }
         0x27 => { let a = (insn as usize >> 8) & 0xFF; return Err(DexError::Exception(registers[a])); }
-        _ => return Err(DexError::Parse(format!("Unknown opcode: 0x{:02x}", opcode))),
+        _ => return Err(DexError::Parse(format!("Unknown or deprecated opcode: 0x{:02x}", opcode))),
     }
     Ok(())
 }
