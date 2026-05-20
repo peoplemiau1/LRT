@@ -1,107 +1,31 @@
-# LRT: Linux Android Runtime
+# Linux Runtime for Android (LRT)
 
-LRT (Linux Android Runtime) is a lightweight, high-performance Dalvik Virtual Machine (VM) and JIT compiler designed to run Android Dalvik Executables (`.dex` and `.apk` files) natively on Linux systems, featuring complete JNI bridging, resources resolution, and full classpath class-hierarchy traversal.
+A lightweight Dalvik Virtual Machine implementation in Rust for executing Android applications (.apk and .dex files) directly on Linux.
 
----
+## Features
+- **Multi-DEX Support:** Automatically parses and loads classes from secondary DEX files.
+- **Auto-Mocking Architecture:** Intelligently bypasses complex Android system dependencies by dynamically mocking objects and their fields when uninitialized, preventing `NullPointerExceptions`.
+- **Flexible Type Checking:** Robustly evaluates `check-cast` and `instance-of` even on unknown or mocked class hierarchies.
+- **Integrated JNI Mocking:** Intercepts unimplemented native system calls and smoothly replaces them with sensible defaults to keep the VM executing.
+- **Dalvik Opcode Support:** Implements full core Dalvik interpreter instruction set for method dispatch, virtual calls, fields access, and calculations.
 
-## Key Features
-
-- **High-Performance Dalvik VM**:
-  - Full bytecode execution including math, remainders, type conversions, packed/sparse switches, and array operations.
-  - Native exception propagation (`try-catch` exception handling) with robust exception table mappings.
-  - Multi-threaded execution support.
-
-- **Dynamic JIT Compiler**:
-  - Direct x86_64 machine code generation via dual-pass register-allocated compilation.
-  - 100% native register allocation for performance-sensitive loops and methods (e.g., Fibonacci, mathematical loops).
-
-- **Complete JNI Subsystem**:
-  - Loading ELF native libraries (`.so`) using standard dynamic linking.
-  - Full execution of `JNI_OnLoad` initialization.
-  - Robust JNI handle management (`VmObject(u32)`) representing JVM/DEX objects.
-  - Java-to-C and C-to-Java call redirection.
-
-- **Classpath Integration & Type Resolution**:
-  - Resolves complex class inheritance and recursive interface checks across both the primary DEX file and `android.dex` classpath library.
-  - Seamless virtual dispatch resolution for classes that inherit from Android SDK framework classes (e.g., `MainActivity` inheriting from `android.app.Activity`).
-
-- **Resource & Manifest Parsing**:
-  - Binary XML parser for `AndroidManifest.xml` to detect the entrypoint component (`MainActivity`).
-  - Resource table parser (`resources.arsc`) to map resource IDs (`0x7f010001`) to localized string values.
-
----
-
-## Architecture Overview
-
-```
-               +----------------------------------+
-               |         Command Line (CLI)       |
-               +----------------------------------+
-                                |
-                                v
-               +----------------------------------+
-               |        AXML & ARSC Parser        |
-               +----------------------------------+
-                                | (Extracts classes.dex, Activity, Resources)
-                                v
-               +----------------------------------+
-               |        Dex Class Loader          | <------+
-               +----------------------------------+        |
-                                |                          | Loads android.dex
-                                v                          | (Classpath SDK)
-+--------------------------------------------------------+ |
-|                        Dalvik VM                       |-+
-+--------------------------------------------------------+
-|  +--------------------+        +--------------------+  |
-|  |     Interpreter    | <----> |    JIT Compiler    |  |
-|  +--------------------+        +--------------------+  |
-|                                                        |
-|  +--------------------+        +--------------------+  |
-|  |   JNI Subsystem    | <----> |   Heap / GC        |  |
-|  +--------------------+        +--------------------+  |
-+--------------------------------------------------------+
-                                |
-                                v
-               +----------------------------------+
-               |       Dynamic Linker (.so)       |
-               +----------------------------------+
-```
-
----
-
-## Getting Started
-
-### Prerequisites
-
-To build and run LRT, you need:
-- Rust toolchain (Rust 2024 edition)
-- Java Runtime Environment (for running `D8`/`R8` compilation if you compile custom SDK resources)
-- Linux environment (x86_64 target)
-
-### Building the Project
-
-Compile the LRT binary in release mode:
+## Building and Usage
 ```bash
 cargo build --release
+cargo install --path .
 ```
 
-### Running Dalvik / APK Executables
-
-To run an APK or DEX file:
+To run an APK:
 ```bash
-./target/release/linux-android-runtime <path/to/file.apk_or.dex> [class_name] [method_name]
+linux-android-runtime /path/to/app.apk
 ```
 
-Example (defaults to `MainActivity` and `onCreate`):
-```bash
-./target/release/linux-android-runtime test_build/test.apk
-```
+## Architecture
+The application is structured into the following key components:
+- `dex/` - DEX file parser and structures.
+- `vm/` - Virtual machine runtime, GC, class resolution, and the execution engine.
+- `vm/interpreter.rs` - The Dalvik byte-code interpreter.
+- `vm/native.rs` - JNI bridge and implementations of fundamental system methods.
 
----
-
-## Development & Verification
-
-Execute the built-in testing suite to verify VM operations, native JNI loading, and typechecks:
-```bash
-cargo run -- test_build/test.apk
-```
+## Current State
+The interpreter is able to successfully parse complex Android Applications, perform Multi-DEX loading, and dive deep into `Activity.onCreate` execution paths while auto-mocking Android SDK frameworks on the fly.
