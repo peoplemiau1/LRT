@@ -1,0 +1,11 @@
+[package]
+name = "linux-android-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libloading = "0.9.0"
+memmap2 = "0.9.10"
+scroll = { version = "0.13.0", features = ["derive"] }
+thiserror = "2.0.18"
+zip = "8.6.0"

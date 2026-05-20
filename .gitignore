@@ -1,0 +1,6 @@
+/target
+.claude
+.gemini
+.system_generated
+*.log
+*.zip
