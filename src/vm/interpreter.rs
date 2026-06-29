@@ -2,6 +2,44 @@ use crate::dex::{DexError, DexResult};
 use crate::vm::{Vm, Object};
 use scroll::{Pread, LE};
 
+/// Dispatches and executes a single DEX-like bytecode instruction, mutating the provided
+/// registers and program counter and interacting with the VM for object/array/field/method
+/// operations and monitor/exception handling.
+///
+/// The function decodes operands from `opcode`, `insn`, and `code.insns`, performs the
+/// operation specified by the opcode (register moves, constant materialization, array/field
+/// access, control flow, arithmetic, invokes, etc.), updates `*pc` appropriately, and
+/// propagates observable VM effects (allocations, field/static access, method execution).
+/// For return or exception opcodes it returns `DexError::Return(_)` or `DexError::Exception(_)`.
+///
+/// # Parameters
+///
+/// - `vm`: mutable reference to the virtual machine instance used for allocations, field/array
+///   access, type resolution, method execution, and other side effects.
+/// - `dex_idx`: index of the active DEX file used for resolving strings, types, fields,
+///   and methods referenced by the instruction.
+/// - `opcode`, `insn`, `pc`, `registers`, `code`: instruction decoding inputs and the
+///   CodeItem containing instruction words.
+///
+/// # Returns
+///
+/// `Ok(())` on successful execution of a non-control-transfer instruction; otherwise returns
+/// `DexError::Return(_)`, `DexError::Exception(_)`, or `DexError::Parse(_)` for returns,
+/// exceptions, and parse/unsupported-opcode conditions respectively.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Typical usage within an interpreter loop:
+/// // let mut vm = Vm::new(...);
+/// // let dex_idx = 0;
+/// // let mut pc = 0usize;
+/// // let mut registers = vec![0u32; 256];
+/// // let code = ...; // a CodeItem for the current method
+/// // let opcode = code.insns[pc] as u8;
+/// // let insn = code.insns[pc];
+/// // execute_instruction(&mut vm, dex_idx, opcode, insn, &mut pc, &mut registers, &code)?;
+/// ```
 pub fn execute_instruction(
     vm: &mut Vm,
     dex_idx: usize,

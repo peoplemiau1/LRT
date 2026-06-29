@@ -36,6 +36,18 @@ pub struct Vm<'a> {
 }
 
 impl<'a> Vm<'a> {
+    /// Creates a new VM instance using the given primary DEX.
+    ///
+    /// The returned VM is initialized with an empty shared heap (index 0 reserved as null), a fresh
+    /// shared state wrapped in an `Arc<Mutex<_>>`, loaded native methods, default resource/config
+    /// settings, a fresh JIT compiler, and a default GC threshold of 65536.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // given a `dex: Dex<'_>` value:
+    /// let vm = vm::Vm::new(&dex);
+    /// ```
     pub fn new(dex: &'a Dex<'a>) -> Self {
         let state = SharedState {
             heap: vec![Object::Null], 
@@ -61,6 +73,18 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Create a VM instance configured for a new VM thread that reuses existing shared state.
+    ///
+    /// The returned VM shares heap, static fields, monitors and other global state via `state`
+    /// and is assigned the provided thread identifier `id`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // assuming `dex: &Dex` and `state: std::sync::Arc<std::sync::Mutex<SharedState>>` are available
+    /// let thread_vm = Vm::new_thread(dex, state.clone(), 1);
+    /// assert_eq!(thread_vm.thread_id, 1);
+    /// ```
     pub fn new_thread(dex: &'a Dex<'a>, state: Arc<Mutex<SharedState>>, id: usize) -> Self {
         Self {
             dex,
@@ -82,14 +106,62 @@ impl<'a> Vm<'a> {
         self.resources = Some(resources);
     }
 
+    /// Sets the VM's special Android dex that will be consulted for lookups that target the Android sentinel dex.
+    ///
+    /// The provided `dex` becomes the VM's android dex and will be used when operations reference the sentinel android dex index.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // `dex` is a loaded `Dex<'_>` instance.
+    /// let dex: Dex = unsafe { std::mem::zeroed() };
+    /// let mut vm = Vm::new(&dex);
+    /// vm.set_android_dex(dex);
+    /// ```
     pub fn set_android_dex(&mut self, dex: Dex<'a>) {
         self.android_dex = Some(dex);
     }
 
+    /// Adds an additional Dex file to this VM's list of extra dexes.
+    ///
+    /// This makes the provided `dex` available for subsequent class and method lookups
+    /// via `get_dex` and `find_class_in_dexes`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Construct VM with a primary Dex, then attach another Dex for lookups.
+    /// let primary_dex = /* create or load a Dex<'_'> */ unimplemented!();
+    /// let mut vm = Vm::new(&primary_dex);
+    /// let extra = /* create or load another Dex<'_'> */ unimplemented!();
+    /// vm.add_extra_dex(extra);
+    /// assert_eq!(vm.extra_dexes.len(), 1);
+    /// ```
     pub fn add_extra_dex(&mut self, dex: Dex<'a>) {
         self.extra_dexes.push(dex);
     }
 
+    /// Selects the Dex corresponding to the provided index.
+    ///
+    /// `idx` of `0` refers to the VM's primary `dex`; any `idx > 0` selects the
+    /// (idx - 1)th entry from `extra_dexes`.
+    ///
+    /// # Parameters
+    ///
+    /// - `idx`: index of the desired Dex (0 = primary, >0 = extra dex slot).
+    ///
+    /// # Returns
+    ///
+    /// A reference to the chosen `Dex<'a>` (primary when `idx == 0`, otherwise
+    /// `&self.extra_dexes[idx - 1]`).
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Given a Vm `vm` with at least one extra dex:
+    /// let primary = vm.get_dex(0);
+    /// let first_extra = vm.get_dex(1);
+    /// ```
     pub fn get_dex(&self, idx: usize) -> &Dex<'a> {
         if idx == 0 {
             self.dex
@@ -98,6 +170,27 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Locate a class by its type descriptor in the VM's primary dex and extra dexes.
+    ///
+    /// Searches the primary dex first (returned with dex index `0`), then each `extra_dexes` entry
+    /// in order (returned with dex index `i + 1` for the i-th extra dex). Returns `None` if the
+    /// class is not found in any dex.
+    ///
+    /// # Returns
+    ///
+    /// `Some((dex_index, class_def_idx))` with the dex index and the class definition index when found,
+    /// `None` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Given a VM `vm` with dex files loaded:
+    /// if let Some((dex_idx, class_idx)) = vm.find_class_in_dexes("Lcom/example/MyClass;") {
+    ///     println!("Found in dex {} at class index {}", dex_idx, class_idx);
+    /// } else {
+    ///     println!("Class not found");
+    /// }
+    /// ```
     pub fn find_class_in_dexes(&self, name: &str) -> Option<(usize, u32)> {
         if let Some(idx) = self.dex.find_class(name).ok().flatten() {
             return Some((0, idx));
@@ -110,6 +203,31 @@ impl<'a> Vm<'a> {
         None
     }
 
+    /// Resolve a method by name starting from `class_desc` and walking up the superclass chain across available dex files.
+    ///
+    /// The function searches the VM's primary dex and any added extra dexes for `class_desc`; if found, it scans that class's virtual and direct methods
+    /// for a method whose decoded name equals `method_name`. If not found in the class, the search continues with the superclass and repeats until the root.
+    /// If no match is found in the primary/extra dexes, the same search is performed against the optional `android_dex` (matches there are reported with the
+    /// sentinel dex index `0xFFFFFFFE`).
+    ///
+    /// # Returns
+    ///
+    /// `Some((dex_idx, class_def_idx, method_idx))` when a matching method is found, where `dex_idx` identifies the dex containing the resolved class
+    /// (or `0xFFFFFFFE` for `android_dex`), otherwise `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Find a static method "main" on class descriptor "Ljava/lang/String;" (example only)
+    /// # use vm::Vm;
+    /// # fn example(vm: &Vm) {
+    /// if let Some((dex_idx, class_def_idx, method_idx)) = vm.resolve_method_by_name("Lcom/example/MyClass;", "doWork") {
+    ///     println!("Found method in dex {}, class {}, method {}", dex_idx, class_def_idx, method_idx);
+    /// } else {
+    ///     println!("Method not found");
+    /// }
+    /// # }
+    /// ```
     pub fn resolve_method_by_name(&self, class_desc: &str, method_name: &str) -> Option<(usize, u32, u32)> {
         let mut current_class_name = class_desc.to_string();
         loop {
@@ -167,11 +285,41 @@ impl<'a> Vm<'a> {
         None
     }
 
+    /// Determines whether a type named by `class_type_name` is considered an instance of `target_type_name`.
+    ///
+    /// The check follows class inheritance and implemented interfaces across the VM's available dex files.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(true)` if `class_type_name` is equal to or a subtype/implementor of `target_type_name`, `Ok(false)` otherwise. Errors from dex parsing or I/O are returned as `Err`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Assuming `vm` is an initialized `Vm`:
+    /// let is_sub = vm.is_instance_of("Lcom/example/MyClass;", "Ljava/lang/Object;");
+    /// assert!(is_sub.unwrap()); // MyClass is an instance of java.lang.Object
+    /// ```
     pub fn is_instance_of(&self, class_type_name: &str, target_type_name: &str) -> DexResult<bool> {
         let res = self.is_instance_of_internal(class_type_name, target_type_name);
         res
     }
 
+    /// Determines whether a type named by `class_type_name` is an instance of `target_type_name` according to the VM's class and interface hierarchy.
+    ///
+    /// This checks equality, the implicit `Ljava/lang/Object;` root, implemented interfaces, and superclass chains across the primary dex, any added extra dexes, and the optional `android_dex`. If a class definition cannot be found for `class_type_name` in any available dex, this function conservatively returns `true`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Constructing a full Vm and Dex is out of scope for this example.
+    /// // The call below demonstrates the intended usage.
+    /// // let vm = Vm::new(&dex);
+    /// // let res = vm.is_instance_of_internal("Lcom/example/MyClass;", "Ljava/lang/Object;").unwrap();
+    /// // assert!(res);
+    /// ```
+    ///
+    /// @returns `true` if `class_type_name` is considered an instance of `target_type_name`, `false` otherwise.
     fn is_instance_of_internal(&self, class_type_name: &str, target_type_name: &str) -> DexResult<bool> {
         if class_type_name == target_type_name { return Ok(true); }
         if target_type_name == "Ljava/lang/Object;" { return Ok(true); }
@@ -275,6 +423,24 @@ impl<'a> Vm<'a> {
         (s.heap.len() - 1) as u32
     }
 
+    /// Performs a conservative mark-and-sweep garbage collection using the provided
+    /// VM registers as root references.
+    ///
+    /// The collector:
+    /// - always treats heap index 0 as live,
+    /// - marks any reachable objects reachable from `active_registers` (and any objects
+    ///   transitively referenced from their instance fields or array elements),
+    /// - replaces unreachable non-null heap entries with `Object::Null` and adds their
+    ///   indices to the `free_list`,
+    /// - prints a brief summary when any objects are swept.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Mark roots in registers 1 and 2 and run a GC.
+    /// // `vm` is a mutable VM instance; this shows the intended call site.
+    /// vm.conservative_gc(&[1, 2]);
+    /// ```
     pub fn conservative_gc(&mut self, active_registers: &[u32]) {
         let mut s = self.state.lock().unwrap();
         let mut marked = vec![false; s.heap.len()];
@@ -325,6 +491,21 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Initializes a class's static fields in the VM and runs its class initializer (`<clinit>`) if present.
+    ///
+    /// This resolves the class by the given `dex_idx` and `class_idx`, populates dex-scoped static field storage with
+    /// any encoded static values (allocating string objects on the heap when needed), marks the class as initialized,
+    /// and invokes the class's `<clinit>` method if one exists.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Assume `dex` is a loaded `Dex` and `vm` is a `Vm` created for that dex.
+    /// // This example is illustrative; adjust construction to your test harness.
+    /// let mut vm = Vm::new(&dex);
+    /// // Initialize class at index 42 in the primary dex (dex_idx = 0).
+    /// vm.initialize_class(0, 42).unwrap();
+    /// ```
     pub fn initialize_class(&mut self, dex_idx: usize, class_idx: u32) -> DexResult<()> {
         let class_name = {
             let active_dex = if dex_idx == 0xFFFFFFFE {
@@ -417,6 +598,32 @@ impl<'a> Vm<'a> {
         Ok(())
     }
 
+    /// Execute a method identified by dex, class, and method indexes with the given VM arguments.
+    ///
+    /// Initializes the declaring class if needed, dispatches to native/JNI handlers when appropriate,
+    /// invokes JIT-compiled code when available, or interprets the method body otherwise.
+    ///
+    /// # Parameters
+    ///
+    /// - `dex_idx`: Index of the dex to resolve the method from. Use `0xFFFFFFFE` to target the special `android_dex`.
+    /// - `def_idx`: Class definition index containing the method, or `0xFFFFFFFF` for external/native methods.
+    /// - `method_idx`: Method index within the dex's method table.
+    /// - `args`: VM register values passed as the method arguments (heap ids for object references).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(u32))` when the method returns a value (object/array/string returns are returned as heap ids; primitive returns are represented as their raw `u32` value), `Ok(None)` for void returns, or an error `Err(DexError::...)` on failure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assuming `vm` is an initialized `Vm` and indexes are valid:
+    /// // let res = vm.execute_method(dex_idx, def_idx, method_idx, &[])?;
+    /// // match res {
+    /// //     Some(val) => println!("returned value/id: {}", val),
+    /// //     None => println!("void return"),
+    /// // }
+    /// ```
     pub fn execute_method(&mut self, dex_idx: usize, def_idx: u32, method_idx: u32, args: &[u32]) -> DexResult<Option<u32>> {
         let (full_sig, type_idx) = {
             let active_dex = if dex_idx == 0xFFFFFFFE {
@@ -581,6 +788,30 @@ impl<'a> Vm<'a> {
         self.run_loop(dex_idx, &code, &mut pc, &mut registers)
     }
 
+    /// Executes the interpreter loop for a CodeItem until it returns, throws an uncaught exception, or reaches the end of the instruction stream.
+    ///
+    /// This advances and updates `pc` and `registers` as instructions execute, performs periodic conservative GC when the heap grows past the VM's threshold, and maps thrown exceptions to try-catch handlers in the provided `code` when available.
+    ///
+    /// # Parameters
+    ///
+    /// - `dex_idx`: index of the active Dex to use for decoding metadata.
+    /// - `code`: the CodeItem whose `insns`, `tries`, and `handlers` drive execution.
+    /// - `pc`: mutable program counter (bytecode index) updated as instructions execute; may be set to a handler target on caught exceptions.
+    /// - `registers`: mutable register array used for execution and GC root scanning.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(u32))` containing a result value heap id when a return value is produced; `Ok(None)` when execution reaches the end without a return; `Err(DexError::Exception(obj_id))` for an uncaught VM exception; or other `DexError` variants for interpreter errors.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Assuming `vm`, `dex_idx`, `code`, `pc`, and `registers` are available and properly initialized:
+    /// // let mut vm = Vm::new(&dex);
+    /// // let mut pc = 0usize;
+    /// // let mut registers = vec![0u32; code.header.registers_size as usize];
+    /// // let res = vm.run_loop(dex_idx, &code, &mut pc, &mut registers);
+    /// ```
     fn run_loop(&mut self, dex_idx: usize, code: &crate::dex::CodeItem, pc: &mut usize, registers: &mut [u32]) -> DexResult<Option<u32>> {
         while *pc < code.insns.len() {
             let insn = code.insns[*pc];
@@ -636,6 +867,22 @@ impl<'a> Vm<'a> {
         Ok(None)
     }
 
+    /// Resolve the concrete method implementation for an object receiver across the VM's loaded dex files.
+    ///
+    /// Attempts to determine the actual method implementation to invoke for the given receiver object by:
+    /// reading the receiver's class descriptor from the heap, obtaining the method name from the specified dex, and searching for a matching method declaration across the primary dex, any extra dexes, and the optional android dex.
+    ///
+    /// # Returns
+    ///
+    /// A tuple `(resolved_dex_idx, class_def_idx, method_idx)` identifying where the implementation was found. Returns the sentinel `(0xFFFFFFFE, 0xFFFFFFFF, method_idx)` when the receiver is not an instance type (e.g., string/array/native) or when resolution fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Given a `Vm` instance `vm`, resolve the concrete method for object id 1 in dex 0:
+    /// let resolved = vm.resolve_method(0, 1, 5).unwrap();
+    /// println!("Resolved method location: {:?}", resolved);
+    /// ```
     pub fn resolve_method(&self, dex_idx: usize, obj_id: u32, method_idx: u32) -> DexResult<(usize, u32, u32)> {
         let class_desc = {
             let s = self.state.lock().unwrap();
@@ -653,6 +900,34 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Retrieve the value of an instance field from the heap.
+    ///
+    /// Returns the 32-bit value stored in the instance's field identified by `field_idx`.
+    /// If the field has not been set, `0` is returned.
+    ///
+    /// # Parameters
+    ///
+    /// - `obj_id`: Heap object id of the instance. `0` is treated as `null` and causes an exception.
+    /// - `field_idx`: Index of the field within the instance to read.
+    ///
+    /// # Returns
+    ///
+    /// `u32` value of the requested field; `0` if the field is absent or unset.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DexError::Exception(0)` when `obj_id` is `0`. Returns `DexError::Parse` if the
+    /// object id is out of heap bounds or the referenced heap slot is not an instance.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Given a VM `vm` with an instance at heap id 1 that has field 2 set to 42:
+    /// // let v = vm.get_field(1, 2).unwrap();
+    /// // assert_eq!(v, 42);
+    /// let v = vm.get_field(1, 2)?;
+    /// assert_eq!(v, 0); // if the field was not set, the result is 0
+    /// ```
     pub fn get_field(&self, obj_id: u32, field_idx: u32) -> DexResult<u32> {
         if obj_id == 0 {
             return Err(DexError::Exception(0));
@@ -665,6 +940,21 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Sets the value of an instance field for the heap object identified by `obj_id`.
+    ///
+    /// On success the field is updated and `Ok(())` is returned.
+    ///
+    /// # Errors
+    ///
+    /// - Returns `Err(DexError::Exception(0))` if `obj_id == 0` (null reference).
+    /// - Returns `Err(DexError::Parse(_))` if the heap entry is not an instance or if `obj_id` is out of heap bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Given a mutable `vm: Vm` and an existing instance at heap id 1 with a field at index 0:
+    /// vm.set_field(1, 0, 42).unwrap();
+    /// ```
     pub fn set_field(&mut self, obj_id: u32, field_idx: u32, val: u32) -> DexResult<()> {
         if obj_id == 0 {
             return Err(DexError::Exception(0));
@@ -677,6 +967,30 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Retrieve the stored static field value for a class in a specific dex.
+    ///
+    /// Looks up the static field map keyed by `(dex_idx, class_idx)` and returns the
+    /// stored `u64` value for `field_idx`, or `0` when no value is present.
+    ///
+    /// # Parameters
+    ///
+    /// - `dex_idx`: index of the dex (0 = primary dex; >0 refers to entries in `extra_dexes`) containing the class.
+    /// - `class_idx`: class definition index within the specified dex.
+    /// - `field_idx`: index of the static field within the class.
+    ///
+    /// # Returns
+    ///
+    /// The `u64` value of the requested static field, or `0` if the field or class has no stored value.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use crate::vm::Vm;
+    /// # fn example(vm: &Vm) {
+    /// let val = vm.get_static_field(0, 1, 2).unwrap();
+    /// assert_eq!(val, 0);
+    /// # }
+    /// ```
     pub fn get_static_field(&self, dex_idx: usize, class_idx: u32, field_idx: u32) -> DexResult<u64> {
         let s = self.state.lock().unwrap();
         if let Some(fields) = s.static_fields.get(&(dex_idx, class_idx)) {
@@ -686,6 +1000,22 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Sets the value of a static field for a class in a specific dex.
+    ///
+    /// This records `val` into the VM's static fields map under the key `(dex_idx, class_idx)`
+    /// and associates it with `field_idx`, creating the class-entry map if necessary.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Assume `vm` is a mutable `Vm` instance.
+    /// // Store the value `42` for field index `3` of class `10` in dex `0`.
+    /// vm.set_static_field(0, 10, 3, 42).unwrap();
+    /// ```
     pub fn set_static_field(&mut self, dex_idx: usize, class_idx: u32, field_idx: u32, val: u64) -> DexResult<()> {
         let mut s = self.state.lock().unwrap();
         s.static_fields.entry((dex_idx, class_idx)).or_insert_with(HashMap::new).insert(field_idx, val);
@@ -729,6 +1059,17 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Retrieve the string contents of a heap object by its object id.
+    ///
+    /// Returns `Some(String)` containing the object's string value if the heap object at `obj_id` is a string, `None` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Assuming `vm` is a `Vm` and object id 1 refers to a string on the heap:
+    /// let s = vm.get_string_val(1);
+    /// assert_eq!(s, Some("hello".to_string()));
+    /// ```
     pub fn get_string_val(&self, obj_id: u32) -> Option<String> {
         let s = self.state.lock().unwrap();
         match s.heap.get(obj_id as usize) {
@@ -737,6 +1078,20 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Get the class descriptor for an instance object from the heap.
+    ///
+    /// Returns `Some(String)` containing the object's class descriptor when the heap
+    /// entry at `obj_id` is an `Object::Instance`, or `None` for null, arrays,
+    /// strings, or out-of-bounds indices.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assume `vm` is a `Vm` with an object at heap id 1 whose class descriptor
+    /// // is "Ljava/lang/String;".
+    /// let desc = vm.get_object_class_desc(1);
+    /// assert_eq!(desc, Some("Ljava/lang/String;".to_string()));
+    /// ```
     pub fn get_object_class_desc(&self, obj_id: u32) -> Option<String> {
         let s = self.state.lock().unwrap();
         match s.heap.get(obj_id as usize) {
@@ -745,6 +1100,25 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Calls a static method identified by class descriptor and method name, searching the VM's primary and extra dex files.
+    ///
+    /// Attempts to locate `class_desc` across the VM's dex pool; if the class and the named static method are found, invokes the method with no arguments and returns its result.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(heap_id))` when the called method returns an object/heap id, `Ok(None)` when the method has no return value or the class/method was not found. Returns `Err(_)` if method execution fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assuming `dex` is a loaded Dex and `vm` is created from it:
+    /// // let mut vm = Vm::new(&dex);
+    /// let res = vm.call_static_by_name("Lcom/example/MyClass;", "main").unwrap();
+    /// match res {
+    ///     Some(id) => println!("method returned object id {}", id),
+    ///     None => println!("no return value or method not found"),
+    /// }
+    /// ```
     pub fn call_static_by_name(&mut self, class_desc: &str, method_name: &str) -> DexResult<Option<u32>> {
         if let Some((dex_idx, class_idx)) = self.find_class_in_dexes(class_desc) {
             let active_dex = self.get_dex(dex_idx);
@@ -770,6 +1144,18 @@ impl<'a> Vm<'a> {
         // Simple stub
     }
 
+    /// Spawns a new OS thread that constructs a child VM sharing this VM's shared state and invokes the specified static method.
+    ///
+    /// The child VM receives a new thread id and a cloned view of this VM's dex tables and shared state, and then calls the static method identified by `class_desc` and `method_name`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Given a `dex: Dex` already loaded:
+    /// let mut vm = Vm::new(&dex);
+    /// vm.spawn_thread("Lcom/example/MyClass;", "main");
+    /// // The call runs asynchronously on a new thread.
+    /// ```
     pub fn spawn_thread(&mut self, class_desc: &str, method_name: &str) {
         let cd = class_desc.to_string();
         let mn = method_name.to_string();
@@ -798,6 +1184,21 @@ impl<'a> Vm<'a> {
         });
     }
 
+    /// Prints a human-readable representation of the heap object identified by `obj_id` to stdout.
+    ///
+    /// Behavior:
+    /// - If the id refers to the VM null object, prints `[STDOUT]: null`.
+    /// - If it refers to a string object, prints `[STDOUT]: <string>`.
+    /// - If it refers to an instance object, prints `[STDOUT]: (Object of type <class_desc>)`.
+    /// - For other object kinds, prints `[STDOUT]: (Object ID <obj_id>)`.
+    /// - If `obj_id` is out of the heap bounds, prints the numeric id as a signed 32-bit integer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // assuming `vm` is a properly initialized `Vm`
+    /// vm.native_println(0);
+    /// ```
     pub fn native_println(&self, obj_id: u32) {
         let s = self.state.lock().unwrap();
         if let Some(obj) = s.heap.get(obj_id as usize) {
@@ -814,6 +1215,18 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Retrieves the list of parameter type descriptors for the given method prototype in the specified dex.
+    ///
+    /// Returns an empty vector when the prototype declares no parameters.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // assuming `vm` is an initialized `Vm` and the dex contains a valid proto at index 1
+    /// let types = vm.get_method_parameter_types(0, 1).unwrap();
+    /// // `types` will be a Vec of type descriptors like "Ljava/lang/String;" or "[I"
+    /// assert!(types.is_empty() || types.iter().all(|s| !s.is_empty()));
+    /// ```
     pub fn get_method_parameter_types(&self, dex_idx: usize, proto_idx: u32) -> DexResult<Vec<String>> {
         let active_dex = self.get_dex(dex_idx);
         let off = active_dex.header.proto_ids_off as usize + (proto_idx as usize * 12);
@@ -830,6 +1243,14 @@ impl<'a> Vm<'a> {
         Ok(types)
     }
 
+    /// Get the method prototype's return type descriptor from the specified dex.
+    ///
+    /// Looks up the `ProtoId` at `proto_idx` in the dex identified by `dex_idx` and
+    /// returns its return type descriptor as a string (for example, `Ljava/lang/String;`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading the proto entry or resolving the type descriptor fails.
     pub fn get_method_return_type(&self, dex_idx: usize, proto_idx: u32) -> DexResult<String> {
         let active_dex = self.get_dex(dex_idx);
         let off = active_dex.header.proto_ids_off as usize + (proto_idx as usize * 12);
@@ -837,6 +1258,28 @@ impl<'a> Vm<'a> {
         active_dex.get_type(proto.return_type_idx)
     }
 
+    /// Convert a VM heap object id into a JNI handle suitable for use with the JNI layer.
+    ///
+    /// Returns `0` for the VM null reference (heap id `0`). For VM string objects this
+    /// returns a JNI string handle; for all other heap objects this returns a VM object
+    /// JNI handle created or looked up by the JNI helper.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Given a `vm: Vm` instance and a heap id:
+    /// let null_handle = vm.vm_to_jni_handle(0);
+    /// assert_eq!(null_handle, 0);
+    ///
+    /// // For a string object (assumes `str_obj_id` is a heap id pointing to an
+    /// // Object::String in the VM heap):
+    /// let str_handle = vm.vm_to_jni_handle(str_obj_id);
+    /// // `str_handle` is a JNI string handle (non-zero).
+    ///
+    /// // For other VM objects:
+    /// let obj_handle = vm.vm_to_jni_handle(obj_id);
+    /// // `obj_handle` is a JNI VM object handle (non-zero).
+    /// ```
     fn vm_to_jni_handle(&self, heap_id: u32) -> usize {
         if heap_id == 0 { return 0; }
         let s = self.state.lock().unwrap();
@@ -850,6 +1293,25 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Convert a JNI handle into a VM object and return its heap id.
+    ///
+    /// Maps JNI handle values produced by the JNI layer into VM representations:
+    /// - `Null` -> `0`
+    /// - `VmObject(hid)` -> returns the existing heap id `hid`
+    /// - `String(s)` -> allocates a VM `Object::String` and returns its new heap id
+    /// - `Class(desc)` -> allocates an empty `Object::Instance` with `class_desc` and returns its heap id
+    ///
+    /// # Returns
+    ///
+    /// The heap id (`u32`) of the VM object corresponding to `jni_handle`. `0` represents the VM null reference.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Example (non-running): convert a JNI handle into a VM heap id.
+    /// // `jni_handle` is obtained from the JNI layer; `vm` is an existing Vm instance.
+    /// // let heap_id = vm.jni_to_vm_handle(jni_handle);
+    /// ```
     fn jni_to_vm_handle(&mut self, jni_handle: usize) -> u32 {
         match crate::jni::resolve_jni_handle(jni_handle) {
             crate::jni::JniToVmMapResult::Null => 0,
